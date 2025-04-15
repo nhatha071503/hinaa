@@ -1,0 +1,18 @@
+2025-04-15 12:01:09,767:WARNING:discord: GENIUS_API_TOKEN không được cấu hình. Tính năng lời bài hát bị giới hạn.
+2025-04-15 12:01:09,768:INFO:discord: Kết nối thành công với Spotify API
+2025-04-15 12:01:09,770:INFO:discord: Hinaa đang khởi động...
+2025-04-15 12:01:09,770:INFO:discord.client: logging in using static token
+2025-04-15 12:01:11,303:INFO:discord.gateway: Shard ID None has connected to Gateway (Session ID: 3e02e77843bb390299377ade67e98f0c).
+2025-04-15 12:01:13,327:INFO:discord: Hinaa đã sẵn sàng với tên Hinaa#1965
+2025-04-15 12:01:13,328:INFO:discord: Không tìm thấy playlists.json, khởi tạo playlist rỗng
+2025-04-15 12:06:50,240:INFO:discord.voice_state: Connecting to voice...
+2025-04-15 12:06:50,240:INFO:discord.voice_state: Starting voice handshake... (connection attempt 1)
+2025-04-15 12:06:50,716:INFO:discord.voice_state: Voice handshake complete. Endpoint found: singapore11026.discord.media
+2025-04-15 12:06:51,179:INFO:discord.voice_state: Voice connection complete.
+2025-04-15 12:06:57,392:INFO:discord: Phát bài: Badtrip - MCK // Nger
+2025-04-15 12:09:36,021:INFO:discord.player: ffmpeg process 40452 successfully terminated with return code of 0.
+2025-04-15 12:10:06,650:INFO:discord: Phát bài: MD ANNIVERSARY - BAN x COOLKID (OFFICIAL VISUALIZER) Prod. By PETERVUX - Dagoats House
+2025-04-15 12:12:26,833:INFO:discord.player: ffmpeg process 29488 successfully terminated with return code of 0.
+2025-04-15 12:13:27,730:INFO:discord: Phát bài: NẮNG (Feat. Coolkid) - RAP VIỆT - Topic
+2025-04-15 12:16:06,015:INFO:discord.player: ffmpeg process 50824 successfully terminated with return code of 0.
+2025-04-15 12:16:11,245:INFO:discord: Phát bài: anh là vì tinh tú mà em chẳng thể chạm vào | playlist (3) - Louw
