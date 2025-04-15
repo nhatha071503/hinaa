@@ -1,3 +1,4 @@
+python
 import discord
 from discord.ext import commands
 import yt_dlp
@@ -77,7 +78,7 @@ current_song = {}
 autoplay_enabled = {}
 votes_to_skip = {}
 playlists = {}
-guess_lol_scores = {}  # Lưu điểm số tạm thời cho !guess_lol
+guess_lol_scores = {}
 
 # Cấu hình AI chat
 ai_config = {
@@ -148,7 +149,7 @@ class AIManager:
                 return track["external_urls"]["spotify"]
             except Exception as e:
                 logger.exception(f"Lỗi lấy bài hát ngẫu nhiên: {e}")
-        return "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+        return None
 
 ai_manager = AIManager()
 
@@ -168,7 +169,7 @@ class MusicControls(discord.ui.View):
             return False
         return interaction.user.guild_permissions.administrator or interaction.user == self.ctx.author
 
-    @discord.ui.button(label="⏸️", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(label="⏸️", style=discord.ButtonStyle.blurple, custom_id="pause_resume")
     async def toggle_pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         if not self.ctx.voice_client:
@@ -178,12 +179,14 @@ class MusicControls(discord.ui.View):
             self.ctx.voice_client.pause()
             self.paused = True
             button.label = "▶️"
+            button.style = discord.ButtonStyle.green
             await interaction.message.edit(view=self)
             await interaction.followup.send("🎶 Nhạc tạm dừng rồi nha! 😊", ephemeral=True)
         elif self.ctx.voice_client.is_paused() and self.paused:
             self.ctx.voice_client.resume()
             self.paused = False
             button.label = "⏸️"
+            button.style = discord.ButtonStyle.blurple
             await interaction.message.edit(view=self)
             await interaction.followup.send("🎶 Hát tiếp nào! 💖", ephemeral=True)
         else:
@@ -265,7 +268,7 @@ async def update_progress(ctx, message, duration, start_time):
             break
         await asyncio.sleep(5)
 
-async def fetch_song_info_async(url: str, is_search: bool = False) -> dict:
+async def fetch_song_info_async(url: str, is_search: bool = False) -> Optional[dict]:
     ydl_opts = {
         "format": "bestaudio/best",
         "noplaylist": True,
@@ -273,9 +276,10 @@ async def fetch_song_info_async(url: str, is_search: bool = False) -> dict:
         "no_warnings": True,
         "simulate": True,
         "skip_download": True,
+        "ignoreerrors": True,
     }
     if is_search:
-        ydl_opts["default_search"] = "ytsearch"
+        ydl_opts["default_search"] = "ytsearch5"
     try:
         loop = asyncio.get_event_loop()
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -283,8 +287,20 @@ async def fetch_song_info_async(url: str, is_search: bool = False) -> dict:
                 loop.run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
                 timeout=10.0
             )
-            if "entries" in info:
-                info = info["entries"][0]
+            if not info:
+                logger.warning(f"Không lấy được thông tin từ URL: {url}")
+                return None
+            if is_search and "entries" in info:
+                for entry in info["entries"]:
+                    if entry and entry.get("url"):
+                        return {
+                            "url": entry["url"],
+                            "title": entry.get("title", "Unknown Title"),
+                            "artist": entry.get("uploader", "Unknown Artist"),
+                            "duration": entry.get("duration", 0),
+                            "thumbnail": entry.get("thumbnail", "https://i.imgur.com/5z1oX0Z.png"),
+                        }
+                return None
             return {
                 "url": info["url"],
                 "title": info.get("title", "Unknown Title"),
@@ -294,13 +310,18 @@ async def fetch_song_info_async(url: str, is_search: bool = False) -> dict:
             }
     except asyncio.TimeoutError:
         logger.exception(f"Timeout khi tải thông tin bài hát: {url}")
-        raise ValueError("Hết thời gian tải bài hát, thử lại nhé!")
+        return None
     except Exception as e:
         logger.exception(f"Lỗi khi tải thông tin bài hát: {e}")
-        raise ValueError("URL không hỗ trợ, thử lại nhé!")
+        return None
 
 async def is_valid_url(url: str) -> bool:
-    return "youtube.com" in url or "youtu.be" in url or "spotify.com" in url or "soundcloud.com" in url
+    return (
+        "youtube.com" in url or 
+        "youtu.be" in url or 
+        "spotify.com" in url or 
+        "soundcloud.com" in url
+    )
 
 async def handle_spotify(ctx, url: str) -> dict:
     if not sp:
@@ -319,11 +340,14 @@ async def handle_spotify(ctx, url: str) -> dict:
             server_id = ctx.guild.id
             if server_id not in queues:
                 queues[server_id] = []
-            for track_item in tracks:
+            valid_tracks = 0
+            for track_item in tracks[:50]:  # Giới hạn 50 bài
                 track = track_item["track"]
                 track_url = track["external_urls"]["spotify"]
-                queues[server_id].append(track_url)
-            return {"is_playlist": True, "count": len(tracks)}
+                if await is_valid_url(track_url):
+                    queues[server_id].append(track_url)
+                    valid_tracks += 1
+            return {"is_playlist": True, "count": valid_tracks}
         else:
             raise ValueError("Chỉ hỗ trợ track/playlist Spotify!")
     except Exception as e:
@@ -342,22 +366,29 @@ async def play_source(ctx, song_info: dict, url: str):
         "thumbnail": song_info["thumbnail"],
     }
     votes_to_skip[server_id] = set()
-    source = discord.FFmpegPCMAudio(
-        song_info["url"],
-        executable=FFMPEG_PATH,
-        before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    )
-    embed = discord.Embed(title="🎵 𝗛𝗶𝗻𝗮𝗮'𝘀 𝗠𝘂𝘀𝗶𝗰 𝗣𝗹𝗮𝘆𝗲𝗿", color=discord.Color.from_rgb(255, 182, 193))
-    embed.add_field(name="🎶 𝗕à𝗶 𝗛á𝘁", value=f"**{song_info['title']}**", inline=False)
-    embed.add_field(name="📊 𝗧𝗶ế𝗻 𝗧𝗿ì𝗻𝗵", value=create_progress_bar(0, song_info["duration"]), inline=False)
-    embed.add_field(name="🎤 𝗡𝗴𝗵ệ 𝗦ĩ", value=f"**{song_info['artist']}**", inline=False)
-    embed.set_image(url=song_info["thumbnail"])
-    embed.set_footer(text="✨ Hinaa luôn sẵn sàng nè! ✨")
-    view = MusicControls(ctx)
-    message = await ctx.send(embed=embed, view=view)
-    logger.info(f"Phát bài: {song_info['title']} - {song_info['artist']}")
-    ctx.voice_client.play(source, after=lambda e: bot.loop.create_task(play_next(ctx)))
-    asyncio.create_task(update_progress(ctx, message, song_info["duration"], start_time))
+    try:
+        source = discord.FFmpegPCMAudio(
+            song_info["url"],
+            executable=FFMPEG_PATH,
+            before_options="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
+        )
+        embed = discord.Embed(title="🎵 𝗛𝗶𝗻𝗮𝗮'𝘀 𝗠𝘂𝘀𝗶𝗰 𝗣𝗹𝗮𝘆𝗲𝗿", color=discord.Color.from_rgb(255, 182, 193))
+        embed.add_field(name="🎶 𝗕à𝗶 𝗛á𝘁", value=f"**{song_info['title']}**", inline=False)
+        embed.add_field(name="📊 𝗧𝗶ế𝗻 𝗧𝗿ì𝗻𝗵", value=create_progress_bar(0, song_info["duration"]), inline=False)
+        embed.add_field(name="🎤 𝗡𝗴𝗵ệ 𝗦ĩ", value=f"**{song_info['artist']}**", inline=False)
+        embed.set_image(url=song_info["thumbnail"])
+        embed.set_footer(text="✨ Hinaa luôn sẵn sàng nè! ✨")
+        view = MusicControls(ctx)
+        message = await ctx.send(embed=embed, view=view)
+        logger.info(f"Phát bài: {song_info['title']} - {song_info['artist']}")
+        ctx.voice_client.play(source, after=lambda e: bot.loop.create_task(play_next(ctx)))
+        asyncio.create_task(update_progress(ctx, message, song_info["duration"], start_time))
+    except Exception as e:
+        logger.exception(f"Lỗi khi phát âm thanh: {e}")
+        embed = discord.Embed(description="🚫 Không thể phát bài hát này, thử bài khác nhé! 😅", color=discord.Color.red())
+        await ctx.send(embed=embed)
+        current_song.pop(server_id, None)
+        await play_next(ctx)
 
 async def play_music(ctx, url: str):
     try:
@@ -378,7 +409,7 @@ async def play_music(ctx, url: str):
                 if server_id not in queues:
                     queues[server_id] = []
                 queues[server_id].append(url)
-                embed = discord.Embed(description=f"🎶 Thêm **{url}** vào hàng đợi! 😊", color=discord.Color.blue())
+                embed = discord.Embed(description=f"🎶 Thêm bài vào hàng đợi! 😊", color=discord.Color.blue())
                 await ctx.send(embed=embed)
             else:
                 embed = discord.Embed(description="🚫 URL không hợp lệ, chỉ hỗ trợ YouTube, Spotify, SoundCloud! 😅", color=discord.Color.red())
@@ -392,13 +423,13 @@ async def play_music(ctx, url: str):
                     color=discord.Color.blue()
                 )
                 await ctx.send(embed=embed)
-                if not ctx.voice_client.is_playing():
+                if not ctx.voice_client.is_playing() and server_id in queues and queues[server_id]:
                     next_url = queues[server_id].pop(0)
                     await play_music(ctx, next_url)
                 return
             song_info = await fetch_song_info_async(spotify_data["search_query"], is_search=True)
         elif "youtube.com/playlist" in url:
-            ydl_opts = {"extract_flat": True, "quiet": True}
+            ydl_opts = {"extract_flat": True, "quiet": True, "ignoreerrors": True}
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = await asyncio.wait_for(
                     asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=False)),
@@ -406,11 +437,14 @@ async def play_music(ctx, url: str):
                 )
             if server_id not in queues:
                 queues[server_id] = []
-            for entry in info["entries"]:
-                queues[server_id].append(entry["url"])
-            embed = discord.Embed(description=f"🎶 Thêm **{len(info['entries'])} bài** từ playlist YouTube! 😊", color=discord.Color.blue())
+            valid_entries = 0
+            for entry in info.get("entries", [])[:50]:  # Giới hạn 50 bài
+                if entry and entry.get("url") and await is_valid_url(entry["url"]):
+                    queues[server_id].append(entry["url"])
+                    valid_entries += 1
+            embed = discord.Embed(description=f"🎶 Thêm **{valid_entries} bài** từ playlist YouTube! 😊", color=discord.Color.blue())
             await ctx.send(embed=embed)
-            if not ctx.voice_client.is_playing():
+            if not ctx.voice_client.is_playing() and server_id in queues and queues[server_id]:
                 next_url = queues[server_id].pop(0)
                 await play_music(ctx, next_url)
             return
@@ -418,6 +452,10 @@ async def play_music(ctx, url: str):
             song_info = await fetch_song_info_async(url)
         else:
             song_info = await fetch_song_info_async(url)
+        if not song_info:
+            embed = discord.Embed(description="🚫 Bài hát này không khả dụng, thử bài khác nhé! 😅", color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
         await play_source(ctx, song_info, url)
     except discord.errors.ClientException:
         logger.exception("Bot chưa vào voice chat")
@@ -434,12 +472,32 @@ async def play_music(ctx, url: str):
 async def play_next(ctx):
     server_id = ctx.guild.id
     if server_id in queues and queues[server_id]:
-        url = queues[server_id].pop(0)
-        await play_music(ctx, url)
+        for _ in range(min(3, len(queues[server_id]))):  # Thử tối đa 3 bài
+            url = queues[server_id].pop(0)
+            try:
+                song_info = await fetch_song_info_async(url)
+                if song_info:
+                    await play_source(ctx, song_info, url)
+                    return
+                logger.warning(f"Bỏ qua URL không khả dụng: {url}")
+            except Exception as e:
+                logger.exception(f"Lỗi khi phát bài tiếp theo: {e}")
+        embed = discord.Embed(description="🚫 Không tìm được bài khả dụng trong hàng đợi, thử thêm bài mới nhé! 😅", color=discord.Color.red())
+        await ctx.send(embed=embed)
     elif autoplay_enabled.get(server_id, False):
-        url = await ai_manager.get_random_song()
-        if url:
-            await play_music(ctx, url)
+        for _ in range(3):  # Thử tối đa 3 lần
+            url = await ai_manager.get_random_song()
+            if url and await is_valid_url(url):
+                try:
+                    song_info = await fetch_song_info_async(url)
+                    if song_info:
+                        await play_source(ctx, song_info, url)
+                        return
+                    logger.warning(f"Bỏ qua URL không khả dụng: {url}")
+                except Exception as e:
+                    logger.exception(f"Lỗi khi phát bài ngẫu nhiên: {e}")
+        embed = discord.Embed(description="🚫 Không tìm được bài ngẫu nhiên khả dụng, thử lại nhé! 😅", color=discord.Color.red())
+        await ctx.send(embed=embed)
     elif ctx.voice_client:
         current_song.pop(server_id, None)
         embed = discord.Embed(description="🎶 Hàng đợi hết rồi! Thêm bài mới nha! 😊", color=discord.Color.blue())
@@ -487,7 +545,11 @@ async def on_guild_remove(guild):
     autoplay_enabled.pop(server_id, None)
     votes_to_skip.pop(server_id, None)
     guess_lol_scores.pop(server_id, None)
-    logger.info(f"Đã xóa dữ liệu của server {server_id}")
+    if server_id in bot.voice_clients:
+        for vc in bot.voice_clients:
+            if vc.guild.id == server_id:
+                await vc.disconnect(force=True)
+    logger.info(f"Đã xóa dữ liệu và ngắt kết nối voice của server {server_id}")
 
 @bot.command()
 async def join(ctx):
@@ -523,7 +585,7 @@ async def leave(ctx):
         server_id = ctx.guild.id
         queues.pop(server_id, None)
         current_song.pop(server_id, None)
-        await ctx.voice_client.disconnect()
+        await ctx.voice_client.disconnect(force=True)
         embed = discord.Embed(description="👋 Hinaa rời kênh rồi! Hẹn gặp lại nha! 😊", color=discord.Color.blue())
         await ctx.send(embed=embed)
     except Exception as e:
@@ -544,6 +606,10 @@ async def play(ctx, url: str):
 async def search(ctx, *, query):
     try:
         song_info = await fetch_song_info_async(query, is_search=True)
+        if not song_info:
+            embed = discord.Embed(description="🚫 Không tìm thấy bài hát nào, thử từ khóa khác nhé! 😅", color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
         await play_music(ctx, song_info["url"])
     except ValueError as e:
         embed = discord.Embed(description=f"🚫 {str(e)} 😅", color=discord.Color.red())
@@ -561,10 +627,19 @@ async def queue(ctx, url: str):
             embed = discord.Embed(description="🚫 URL không hợp lệ, chỉ hỗ trợ YouTube, Spotify, SoundCloud! 😅", color=discord.Color.red())
             await ctx.send(embed=embed)
             return
+        song_info = await fetch_song_info_async(url)
+        if not song_info:
+            embed = discord.Embed(description="🚫 Bài hát này không khả dụng, thử bài khác nhé! 😅", color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
         if server_id not in queues:
             queues[server_id] = []
-        queues[server_id].append(url)
-        embed = discord.Embed(description=f"🎶 Thêm **{url}** vào hàng đợi! 😊", color=discord.Color.blue())
+        if len(queues[server_id]) >= 50:
+            embed = discord.Embed(description="🚫 Hàng đợi đã đầy (tối đa 50 bài)! 😅", color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
+        queues[server_id].append((url, song_info["title"], song_info["artist"]))
+        embed = discord.Embed(description=f"🎶 Thêm **{song_info['title']}** vào hàng đợi! 😊", color=discord.Color.blue())
         await ctx.send(embed=embed)
     except Exception as e:
         logger.exception(f"Lỗi khi thêm vào hàng đợi: {e}")
@@ -579,16 +654,10 @@ async def queue_list(ctx):
             embed = discord.Embed(description="🎵 𝗛à𝗻𝗴 Đợ𝗶 𝗧𝗿ố𝗻𝗴! 😅", color=discord.Color.red())
             await ctx.send(embed=embed)
             return
-        queue_list = []
-        for i, url in enumerate(queues[server_id][:10]):  # Giới hạn 10 bài
-            try:
-                song_info = await fetch_song_info_async(url)
-                queue_list.append(f"**{i+1}.** {song_info['title']} - {song_info['artist']}")
-            except:
-                queue_list.append(f"**{i+1}.** {url} (Không lấy được thông tin)")
+        queue_list = [f"**{i+1}.** {title} - {artist}" for i, (_, title, artist) in enumerate(queues[server_id][:10])]
         description = "\n".join(queue_list)
         embed = discord.Embed(
-            title="📜 �_D𝗮𝗻𝗵 𝗦á𝗰𝗵 𝗛à𝗻𝗴 Đợ𝗶",
+            title="📜 𝗗𝗮𝗻𝗵 𝗦á𝗰𝗵 𝗛à𝗻𝗴 Đợ𝗶",
             description=description,
             color=discord.Color.blue()
         )
@@ -648,15 +717,14 @@ async def volume(ctx, level: int):
 def get_lyrics(title: str, artist: str) -> str:
     try:
         song = genius.search_song(title, artist)
-        result = song.lyrics if song else "Không tìm thấy lời bài hát! 😅"
-        return result
+        return song.lyrics if song else "Không tìm thấy lời bài hát! 😅"
     except Exception as e:
         logger.exception(f"Lỗi khi lấy lời bài hát: {e}")
         return "Lỗi khi lấy lời bài hát, thử lại nhé! 😅"
 
 async def clear_lyrics_cache():
     while True:
-        await asyncio.sleep(3600)  # Xóa cache sau 1 giờ
+        await asyncio.sleep(3600)
         get_lyrics.cache_clear()
         logger.info("Đã xóa cache lời bài hát")
 
@@ -665,7 +733,7 @@ async def send_paginated_lyrics(ctx, lyrics: str):
     pages = [lyrics[i:i + max_length] for i in range(0, len(lyrics), max_length)]
     current_page = 0
     embed = discord.Embed(
-        title="🎤 𝗞𝗮𝗿𝗮𝗼𝗸𝗲 𝗧𝗶𝗺𝗲!",
+        title="🎤 �_K𝗮𝗿𝗮𝗼𝗸𝗲 𝗧𝗶𝗺𝗲!",
         description=pages[current_page][:1000],
         color=discord.Color.blue()
     )
@@ -701,6 +769,10 @@ async def karaoke(ctx, url: str):
             await ctx.send(embed=embed)
             return
         song_info = await fetch_song_info_async(url)
+        if not song_info:
+            embed = discord.Embed(description="🚫 Bài hát này không khả dụng, thử bài khác nhé! 😅", color=discord.Color.red())
+            await ctx.send(embed=embed)
+            return
         lyrics = get_lyrics(song_info["title"], song_info["artist"])
         await send_paginated_lyrics(ctx, lyrics)
         await play_music(ctx, url)
@@ -780,15 +852,14 @@ async def guess_lol(ctx):
                 color=discord.Color.red()
             )
             await ctx.send(embed=embed)
-        # Hiển thị bảng xếp hạng
         if guess_lol_scores[server_id]:
             leaderboard = "\n".join(
-                f"**{ctx.guild.get_member(int(uid)).display_name}**: {score}"
+                f"**{ctx.guild.get_member(int(uid)).display_name if ctx.guild.get_member(int(uid)) else 'Unknown User'}**: {score}"
                 for uid, score in sorted(guess_lol_scores[server_id].items(), key=lambda x: x[1], reverse=True)[:5]
             )
             embed = discord.Embed(
                 title="🏆 𝗕ả𝗻𝗴 𝗫ế𝗽 𝗛𝗮𝗻𝗴",
-                description=leaderboard,
+                description=leaderboard or "Chưa có điểm nào!",
                 color=discord.Color.blue()
             )
             await ctx.send(embed=embed)
@@ -811,7 +882,7 @@ def load_playlists():
         with open("playlists.json", "r", encoding="utf-8") as f:
             data = json.load(f)
             if isinstance(data, dict):
-                playlists.update({str(k): v for k, v in data.items()})  # Chuyển key thành str
+                playlists.update({str(k): v for k, v in data.items()})
                 logger.info("Đã tải playlist từ playlists.json")
             else:
                 logger.warning("File playlists.json không đúng định dạng, khởi tạo playlist rỗng")
@@ -850,9 +921,14 @@ async def playlist(ctx, action: str, name: str = None, url: str = None):
                 embed = discord.Embed(description="🚫 URL không hợp lệ, chỉ hỗ trợ YouTube, Spotify, SoundCloud! 😅", color=discord.Color.red())
                 await ctx.send(embed=embed)
                 return
+            song_info = await fetch_song_info_async(url)
+            if not song_info:
+                embed = discord.Embed(description="🚫 Bài hát này không khả dụng, thử bài khác nhé! 😅", color=discord.Color.red())
+                await ctx.send(embed=embed)
+                return
             playlists[user_id][name].append(url)
             save_playlists()
-            embed = discord.Embed(description=f"🎶 Thêm bài vào **{name}**! 😊", color=discord.Color.blue())
+            embed = discord.Embed(description=f"🎶 Thêm **{song_info['title']}** vào **{name}**! 😊", color=discord.Color.blue())
             await ctx.send(embed=embed)
         elif action == "remove" and name and url:
             if user_id not in playlists or name not in playlists[user_id]:
@@ -875,15 +951,22 @@ async def playlist(ctx, action: str, name: str = None, url: str = None):
             server_id = ctx.guild.id
             if server_id not in queues:
                 queues[server_id] = []
-            queues[server_id].extend(playlists[user_id][name])
+            valid_urls = 0
+            for url in playlists[user_id][name]:
+                if await is_valid_url(url):
+                    song_info = await fetch_song_info_async(url)
+                    if song_info:
+                        queues[server_id].append((url, song_info["title"], song_info["artist"]))
+                        valid_urls += 1
             embed = discord.Embed(
-                description=f"🎶 Thêm **{len(playlists[user_id][name])} bài** từ **{name}** vào hàng đợi! 😊",
+                description=f"🎶 Thêm **{valid_urls} bài** từ **{name}** vào hàng đợi! 😊",
                 color=discord.Color.blue()
             )
             await ctx.send(embed=embed)
             if not ctx.voice_client or not (ctx.voice_client.is_playing() or ctx.voice_client.is_paused()):
-                next_url = queues[server_id].pop(0)
-                await play_music(ctx, next_url)
+                if server_id in queues and queues[server_id]:
+                    next_url, _, _ = queues[server_id].pop(0)
+                    await play_music(ctx, next_url)
         elif action == "list":
             if user_id not in playlists or not playlists[user_id]:
                 embed = discord.Embed(description="🎵 Bạn chưa có playlist nào! 😅", color=discord.Color.red())
@@ -937,6 +1020,7 @@ async def status(ctx):
         uptime = datetime.datetime.now() - datetime.datetime.fromtimestamp(bot.start_time)
         uptime_str = str(uptime).split(".")[0]
         guild_count = len(bot.guilds)
+        memory_usage = (await asyncio.get_event_loop().run_in_executor(None, lambda: psutil.Process().memory_info().rss)) / 1024 / 1024
         embed = discord.Embed(title="📊 𝗧𝗿ạ𝗻𝗴 𝗧𝗵á𝗶 𝗖ủ𝗮 𝗛𝗶𝗻𝗮𝗮", color=discord.Color.blue())
         embed.add_field(name="⏰ 𝗧𝗵ờ𝗶 𝗚𝗶𝗮𝗻 𝗛𝗼ạ𝘁 Độ𝗻𝗴", value=uptime_str, inline=False)
         embed.add_field(name="🌐 𝗦𝗲𝗿𝘃𝗲𝗿", value=f"**{guild_count}** server", inline=False)
@@ -945,6 +1029,7 @@ async def status(ctx):
             value="Đang phát nhạc" if ctx.voice_client and ctx.voice_client.is_playing() else "Không hoạt động",
             inline=False
         )
+        embed.add_field(name="💾 𝗕ộ 𝗡𝗵ớ", value=f"**{memory_usage:.2f} MB**", inline=False)
         embed.set_footer(text="✨ Hinaa luôn sẵn sàng nè! ✨")
         await ctx.send(embed=embed)
     except Exception as e:
@@ -958,23 +1043,27 @@ async def help(ctx):
     embed.add_field(
         name="🎶 𝗔𝗺 𝗡𝗵ạ𝗰",
         value=(
-            "`!join`: Vào kênh voice\n"
-            "`!leave`: Rời kênh voice\n"
-            "`!play <url>`: Phát nhạc\n"
-            "`!search <tên>`: Tìm và phát nhạc\n"
-            "`!queue <url>`: Thêm vào hàng đợi\n"
-            "`!queue_list`: Xem hàng đợi\n"
-            "`!skip`: Bỏ qua bài hiện tại\n"
-            "`!karaoke <url>`: Hiển thị lời bài hát\n"
-            "`!volume <0-100>`: Điều chỉnh âm lượng\n"
-            "`!np`: Xem bài đang phát\n"
-            "`!playlist`: Quản lý playlist"
+            "`!join` - Vào kênh voice của bạn\n"
+            "`!leave` - Rời kênh voice\n"
+            "`!play <url>` - Phát nhạc từ YouTube, Spotify, SoundCloud\n"
+            "`!search <tên>` - Tìm và phát nhạc\n"
+            "`!queue <url>` - Thêm bài vào hàng đợi (tối đa 50 bài)\n"
+            "`!queue_list` - Xem danh sách hàng đợi\n"
+            "`!skip` - Bỏ qua bài hiện tại (cần vote)\n"
+            "`!karaoke <url>` - Hiển thị lời bài hát và phát nhạc\n"
+            "`!volume <0-100>` - Điều chỉnh âm lượng\n"
+            "`!np` - Xem bài đang phát\n"
+            "`!playlist <hành động>` - Quản lý playlist (create/add/remove/play/list/delete)"
         ),
         inline=False
     )
-    embed.add_field(name="😄 𝗚𝗶ả𝗶 𝗧𝗿í", value="`!guess_lol`: Đoán tướng LoL", inline=False)
-    embed.add_field(name="⚙️ 𝗤𝘂ả𝗻 𝗟ý", value="`!status`: Xem trạng thái bot\n`!aichat`: Tương tác AI", inline=False)
-    embed.set_footer(text="✨ Cần giúp đỡ? Vào #hinaa-support nha! ✨")
+    embed.add_field(name="😄 𝗚𝗶ả𝗶 𝗧𝗿í", value="`!guess_lol` - Đoán tướng LoL, thi đua điểm số!", inline=False)
+    embed.add_field(
+        name="⚙️ 𝗤𝘂ả𝗻 𝗟ý",
+        value="`!status` - Xem trạng thái bot\n`!aichat` - Trò chuyện với Hinaa qua AI",
+        inline=False
+    )
+    embed.set_footer(text="✨ Cần giúp đỡ? Liên hệ admin trong #hinaa-support nha! ✨")
     await ctx.send(embed=embed)
 
 async def main():
@@ -982,7 +1071,17 @@ async def main():
     logger.info("Hinaa đang khởi động...")
     async with bot:
         bot.loop.create_task(clear_lyrics_cache())
-        await bot.start(DISCORD_BOT_TOKEN)
+        for attempt in range(3):
+            try:
+                await bot.start(DISCORD_BOT_TOKEN)
+                break
+            except Exception as e:
+                logger.exception(f"Lỗi khởi động bot lần {attempt + 1}: {e}")
+                if attempt < 2:
+                    await asyncio.sleep(5)
+                else:
+                    logger.error("Không thể khởi động bot sau 3 lần thử!")
+                    raise
 
 if __name__ == "__main__":
     asyncio.run(main())
